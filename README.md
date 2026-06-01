@@ -16,7 +16,8 @@ A TUI tool for quickly switching between Claude Code API backends (Anthropic off
 ### Homebrew (macOS)
 
 ```bash
-brew install xbunax/tap/claude-switch
+brew tap xbunax/tap
+brew install claude-switch
 ```
 
 ### Manual (build from source)
