@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
 
     // In --eval mode the TUI renders to stderr so stdout stays clean for eval
     let mut app_state = app::App::new(backends);
-    let confirmed = app::run_app(&mut app_state, cli.eval)?;
+    let confirmed = app::run_app(&mut app_state, &config_dir, cli.eval)?;
 
     if !confirmed {
         eprintln!("Cancelled");

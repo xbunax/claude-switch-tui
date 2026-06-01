@@ -225,6 +225,28 @@ pub fn write_env_file(path: &Path, backend: &Backend) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Write a new backend `.env` file directly from form fields.
+pub fn save_backend_env(
+    config_dir: &Path,
+    name: &str,
+    base_url: &str,
+    api_key: &str,
+    description: &str,
+) -> anyhow::Result<PathBuf> {
+    fs::create_dir_all(config_dir)?;
+
+    let filename = format!("{}.env", name);
+    let path = config_dir.join(&filename);
+
+    let content = format!(
+        "# {}\nANTHROPIC_BASE_URL={}\nANTHROPIC_API_KEY={}\n",
+        description, base_url, api_key
+    );
+
+    fs::write(&path, content)?;
+    Ok(path)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -360,6 +382,24 @@ mod tests {
         // Running again should fail
         let result = init_config(&dir);
         assert!(result.is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_backend_env() {
+        let dir = std::env::temp_dir().join("claude-switch-test-save");
+        let _ = fs::remove_dir_all(&dir);
+
+        let path = save_backend_env(&dir, "my-api", "https://api.example.com", "sk-key", "Test API")
+            .unwrap();
+
+        assert_eq!(path, dir.join("my-api.env"));
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# Test API"));
+        assert!(content.contains("ANTHROPIC_BASE_URL=https://api.example.com"));
+        assert!(content.contains("ANTHROPIC_API_KEY=sk-key"));
 
         let _ = fs::remove_dir_all(&dir);
     }

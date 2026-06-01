@@ -4,7 +4,9 @@ A TUI tool for quickly switching between Claude Code API backends (Anthropic off
 
 ## Features
 
-- **Interactive TUI** — browse and select backends with keyboard navigation (↑/↓/j/k, Enter to confirm, q to quit)
+- **Interactive TUI** — two tabs: Backend Switcher and Create New Backend, switchable with ←/→
+- **Create backends** — fill in name, base URL, API key, and description directly in the TUI; saved as `.env` files
+- **Delete backends** — remove unwanted backends with `d` (confirmation required)
 - **API reachability check** — each backend is probed on startup to verify connectivity, with results shown inline (✓ reachable, ✗ unreachable)
 - **Model discovery** — automatically fetches available models via Anthropic, OpenAI-compatible, and DeepSeek API patterns
 - **Shell integration** — one-time setup gives you a `cs` command that switches backends and auto-exports the environment into your current shell
@@ -37,7 +39,24 @@ ANTHROPIC_API_KEY=sk-ant-xxx
 
 `export` prefixes and quoted values are handled automatically. Both `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are recognized as API key fields.
 
-## Usage
+## TUI keybindings
+
+| Key | Action |
+|---|---|
+| `←` / `→` | Switch between Backend Switcher and Create tabs |
+| **Backend Switcher** | |
+| `↑` `↓` / `j` `k` | Navigate backend list |
+| `Enter` | Confirm selection and exit |
+| `d` | Delete selected backend (with confirmation) |
+| `r` | Refresh backend list and re-check reachability |
+| `q` / `Esc` | Quit |
+| **Create New Backend** | |
+| `Tab` / `↓` | Next field |
+| `↑` | Previous field |
+| `Enter` | Save new backend (with confirmation) |
+| `q` / `Esc` | Quit |
+
+## CLI usage
 
 ```
 claude-switch [OPTIONS]
@@ -52,10 +71,11 @@ claude-switch [OPTIONS]
 
 ## How it works
 
-1. Backends are loaded from `.env` files in the config directory
-2. The TUI displays all backends and concurrently checks API reachability for each
-3. On selection, the backend's environment variables are written to `claude.env`
-4. With `--eval`, the variables are printed as `export` statements — the `cs` shell function `eval`s this output so the environment updates in the current shell immediately
+1. Backends are loaded from `.env` files in `~/.config/claude-switch/`
+2. The TUI displays all backends with live reachability status and model counts
+3. Backends can be created or deleted directly in the TUI; the config directory is kept in sync
+4. On selection, the backend's environment variables are written to `claude.env`
+5. With `--eval`, the variables are printed as `export` statements — the `cs` shell function `eval`s this output so the environment updates in the current shell immediately
 
 ## Build from source
 
