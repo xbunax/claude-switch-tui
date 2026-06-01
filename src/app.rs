@@ -3,10 +3,9 @@ use crate::config::{discover_backends, save_backend_env, Backend};
 use crate::ui;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self},
 };
-use ratatui::prelude::*;
+use ratatui::{prelude::*, TerminalOptions, Viewport};
 use std::io::{self, Write};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -240,33 +239,45 @@ pub fn run_app(app: &mut App, config_dir: &std::path::Path, use_stderr: bool) ->
 }
 
 fn run_on_stdout(app: &mut App, config_dir: &std::path::Path) -> io::Result<bool> {
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
     terminal::enable_raw_mode()?;
 
+    let height = ui::dialog_height(app, terminal::size()?.1);
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Inline(height),
+        },
+    )?;
     let result = event_loop(&mut terminal, app, config_dir);
 
-    terminal::disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    // Clear the inline area so the shell prompt sits cleanly below
+    let _ = terminal.clear();
+    drop(terminal);
 
+    terminal::disable_raw_mode()?;
     result?;
     Ok(app.confirmed)
 }
 
 fn run_on_stderr(app: &mut App, config_dir: &std::path::Path) -> io::Result<bool> {
-    let mut stderr = io::stderr();
-    execute!(stderr, EnterAlternateScreen)?;
     terminal::enable_raw_mode()?;
 
+    let height = ui::dialog_height(app, terminal::size()?.1);
     let backend = CrosstermBackend::new(io::stderr());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Inline(height),
+        },
+    )?;
     let result = event_loop(&mut terminal, app, config_dir);
 
-    terminal::disable_raw_mode()?;
-    execute!(io::stderr(), LeaveAlternateScreen)?;
+    // Clear the inline area
+    let _ = terminal.clear();
+    drop(terminal);
 
+    terminal::disable_raw_mode()?;
     // Flush stderr so the TUI is fully cleared before we write to stdout
     io::stderr().flush()?;
 

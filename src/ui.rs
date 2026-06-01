@@ -5,24 +5,28 @@ use ratatui::{
     widgets::*,
 };
 
-/// Render the TUI dialog.
-pub fn render(frame: &mut Frame, app: &App) {
-    let area = frame.area();
-
+/// Compute the dialog height for a given terminal height.
+pub fn dialog_height(app: &App, terminal_height: u16) -> u16 {
     let env_count = if app.expanded && app.mode == Mode::Select && !app.backends.is_empty() {
         app.backends[app.selected].env.len() as u16
     } else {
         0
     };
     let detail_extra: u16 = (env_count + 4).min(16);
-
-    let dialog_width = area.width.saturating_sub(8).clamp(56, 92);
-    let dialog_height = match app.mode {
+    match app.mode {
         Mode::Select => ((app.backends.len() as u16) + 10 + detail_extra)
             .max(15)
-            .min(area.height.saturating_sub(4)),
-        Mode::Create => 15.min(area.height.saturating_sub(4)),
-    };
+            .min(terminal_height.saturating_sub(4)),
+        Mode::Create => 15.min(terminal_height.saturating_sub(4)),
+    }
+}
+
+/// Render the TUI dialog.
+pub fn render(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+
+    let dialog_width = area.width.saturating_sub(8).clamp(56, 92);
+    let dialog_height = dialog_height(app, area.height);
 
     let dialog_area = centered_rect(dialog_width, dialog_height, area);
 
