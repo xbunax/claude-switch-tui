@@ -3,7 +3,8 @@ use crate::config::{discover_backends, save_backend_env, Backend};
 use crate::ui;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
-    terminal::{self},
+    execute,
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, TerminalOptions, Viewport};
 use std::io::{self, Write};
@@ -261,23 +262,17 @@ fn run_on_stdout(app: &mut App, config_dir: &std::path::Path) -> io::Result<bool
 }
 
 fn run_on_stderr(app: &mut App, config_dir: &std::path::Path) -> io::Result<bool> {
+    let mut stderr = io::stderr();
+    execute!(stderr, EnterAlternateScreen)?;
     terminal::enable_raw_mode()?;
 
-    let height = ui::dialog_height(app, terminal::size()?.1);
     let backend = CrosstermBackend::new(io::stderr());
-    let mut terminal = Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(height),
-        },
-    )?;
+    let mut terminal = Terminal::new(backend)?;
     let result = event_loop(&mut terminal, app, config_dir);
 
-    // Clear the inline area
-    let _ = terminal.clear();
-    drop(terminal);
-
     terminal::disable_raw_mode()?;
+    execute!(io::stderr(), LeaveAlternateScreen)?;
+
     // Flush stderr so the TUI is fully cleared before we write to stdout
     io::stderr().flush()?;
 
