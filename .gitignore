@@ -1,0 +1,10 @@
+backends.json
+*.env
+__pycache__/
+.venv/
+.uv-cache/
+
+
+# Added by cargo
+
+/target

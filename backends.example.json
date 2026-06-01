@@ -1,0 +1,20 @@
+{
+  "backends": [
+    {
+      "name": "Anthropic Official",
+      "description": "Direct Anthropic API connection",
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        "ANTHROPIC_API_KEY": "sk-ant-xxx"
+      }
+    },
+    {
+      "name": "Custom Gateway",
+      "description": "Replace with your proxy, private gateway, or compatible service",
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://example.com/anthropic",
+        "ANTHROPIC_API_KEY": "your-token"
+      }
+    }
+  ]
+}
