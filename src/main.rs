@@ -113,7 +113,13 @@ fn print_shell_init() {
         r#"# Claude Switch — auto-activates the selected backend
 # Usage: cs
 cs() {{
-  eval "$({exe} --eval "$@")"
+  {exe} "$@"
+  local ret=$?
+  if [ $ret -eq 0 ]; then
+    local env_file="${{XDG_CONFIG_HOME:-$HOME/.config}}/claude-switch/claude.env"
+    [ -f "$env_file" ] && source "$env_file"
+  fi
+  return $ret
 }}"#,
         exe = exe
     );

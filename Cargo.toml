@@ -1,6 +1,6 @@
 [package]
 name = "claude-switch"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "A small TUI for switching Claude Code backend environment variables."
 
