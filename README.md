@@ -11,17 +11,38 @@ A TUI tool for quickly switching between Claude Code API backends (Anthropic off
 - **Model discovery** — automatically fetches available models via Anthropic, OpenAI-compatible, and DeepSeek API patterns
 - **Shell integration** — one-time setup gives you a `cs` command that switches backends and auto-exports the environment into your current shell
 
-## Quick start
+## Installation
+
+### Homebrew (macOS)
 
 ```bash
-# Build & install
-./install.sh
+brew install xbunax/tap/claude-switch
+```
 
+### Manual (build from source)
+
+```bash
+git clone https://github.com/xbunax/claude-switch-tui.git
+cd claude-switch-tui
+./install.sh
+```
+
+`install.sh` compiles the release binary and copies it to `~/.local/bin/claude-switch`.
+
+### Shell setup
+
+Add the `cs` command to your shell rc file:
+
+```bash
+claude-switch --shell-init >> ~/.zshrc   # or ~/.bashrc
+source ~/.zshrc
+```
+
+Then:
+
+```bash
 # Create example config files
 claude-switch --init
-
-# Set up the cs shell command (one-time)
-claude-switch --shell-init >> ~/.zshrc && source ~/.zshrc
 
 # Switch backends
 cs
@@ -77,9 +98,9 @@ claude-switch [OPTIONS]
 4. On selection, the backend's environment variables are written to `claude.env`
 5. With `--eval`, the variables are printed as `export` statements — the `cs` shell function `eval`s this output so the environment updates in the current shell immediately
 
-## Build from source
+## Development
 
 ```bash
-cargo build --release
-# binary at target/release/claude-switch
+cargo build
+cargo test
 ```
