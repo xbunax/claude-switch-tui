@@ -9,9 +9,16 @@ use ratatui::{
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
+    let env_count = if app.expanded && app.mode == Mode::Select && !app.backends.is_empty() {
+        app.backends[app.selected].env.len() as u16
+    } else {
+        0
+    };
+    let detail_extra: u16 = (env_count + 4).min(16);
+
     let dialog_width = area.width.saturating_sub(8).clamp(56, 92);
     let dialog_height = match app.mode {
-        Mode::Select => ((app.backends.len() as u16) + 10)
+        Mode::Select => ((app.backends.len() as u16) + 10 + detail_extra)
             .max(15)
             .min(area.height.saturating_sub(4)),
         Mode::Create => 15.min(area.height.saturating_sub(4)),
@@ -57,6 +64,14 @@ fn render_tabs(app: &App) -> Line<'static> {
 // ---------------------------------------------------------------------------
 
 fn render_select(frame: &mut Frame, area: Rect, app: &App) {
+    if app.expanded && !app.backends.is_empty() {
+        render_select_expanded(frame, area, app);
+    } else {
+        render_select_normal(frame, area, app);
+    }
+}
+
+fn render_select_normal(frame: &mut Frame, area: Rect, app: &App) {
     let layout = Layout::vertical([
         Constraint::Length(1),  // header
         Constraint::Fill(1),    // list
@@ -66,6 +81,26 @@ fn render_select(frame: &mut Frame, area: Rect, app: &App) {
     ])
     .split(area);
 
+    render_select_list(frame, area, app, layout);
+}
+
+fn render_select_expanded(frame: &mut Frame, area: Rect, app: &App) {
+    let list_rows = (app.backends.len() as u16).min(10).max(3);
+    let layout = Layout::vertical([
+        Constraint::Length(1),         // header
+        Constraint::Length(list_rows), // list
+        Constraint::Fill(1),           // detail
+        Constraint::Length(1),         // hint
+    ])
+    .split(area);
+
+    render_select_list(frame, area, app, layout.clone());
+
+    // Detail panel
+    render_detail_panel(frame, layout[2], app);
+}
+
+fn render_select_list(frame: &mut Frame, _area: Rect, app: &App, layout: std::rc::Rc<[Rect]>) {
     // Header
     let header = Paragraph::new("Select backend configuration to load:")
         .style(Style::default().add_modifier(Modifier::BOLD));
@@ -93,8 +128,8 @@ fn render_select(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_stateful_widget(list, layout[1], &mut list_state(app.selected));
 
-    // Status line
-    if !app.backends.is_empty() {
+    // Status + models (only in normal mode, layout.len() == 5)
+    if layout.len() >= 5 && !app.backends.is_empty() {
         let sel_status = &app.backend_status[app.selected];
         let desc = app.selected_backend().description.as_str();
         let status_text = match sel_status {
@@ -110,17 +145,9 @@ fn render_select(frame: &mut Frame, area: Rect, app: &App) {
         ]));
         frame.render_widget(status_paragraph, layout[2]);
 
-        // Models line
         let models_text = match &app.backend_status[app.selected] {
             CheckStatus::Reachable { models } if !models.is_empty() => {
-                let width = layout[3].width.saturating_sub(2) as usize;
-                let joined = models.join(", ");
-                if joined.len() > width {
-                    let truncated: String = joined.chars().take(width.saturating_sub(3)).collect();
-                    format!("Models: {}...", truncated)
-                } else {
-                    format!("Models: {}", joined)
-                }
+                format!("Models: {}", models.join(", "))
             }
             CheckStatus::Reachable { .. } => "API reachable, no model list returned".into(),
             _ => String::new(),
@@ -131,9 +158,69 @@ fn render_select(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Hint
-    let hint = Paragraph::new("↑/↓ Select  Enter Confirm  d Delete  r Check  ←/→ Tab  q/Esc Quit")
+    let hint_text = if layout.len() >= 5 {
+        "↑/↓ Select  Tab Expand  Enter Confirm  d Delete  r Check  ←/→ Tab  q/Esc Quit"
+    } else {
+        "↑/↓ Select  Tab Collapse  Enter Confirm  d Delete  r Check  ←/→ Tab  q/Esc Quit"
+    };
+    let hint = Paragraph::new(hint_text)
         .style(Style::default().add_modifier(Modifier::DIM));
-    frame.render_widget(hint, layout[4]);
+    frame.render_widget(hint, layout[layout.len() - 1]);
+}
+
+// ---------------------------------------------------------------------------
+// Detail panel (expanded backend view)
+// ---------------------------------------------------------------------------
+
+fn render_detail_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let backend = &app.backends[app.selected];
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let cyan = Style::default().fg(Color::Cyan);
+
+    let block = Block::bordered()
+        .title(format!(" {} ", backend.name))
+        .title_style(bold);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Model list (always visible at top)
+    let models_text = match &app.backend_status[app.selected] {
+        CheckStatus::Reachable { models } if !models.is_empty() => {
+            format!("Models: {}", models.join(", "))
+        }
+        CheckStatus::Reachable { .. } => "Models: (none)".into(),
+        CheckStatus::InProgress => "Models: checking...".into(),
+        CheckStatus::Pending => "Models: waiting...".into(),
+        CheckStatus::Unreachable { error } => format!("Unreachable: {}", error),
+        CheckStatus::Skipped { reason } => reason.clone(),
+    };
+    lines.push(Line::from(vec![Span::styled(models_text, cyan.add_modifier(Modifier::BOLD))]));
+    lines.push(Line::raw(""));
+
+    // Env vars
+    let mut keys: Vec<&String> = backend.env.keys().collect();
+    keys.sort();
+    for key in keys {
+        let value = &backend.env[key];
+        let display = if key.contains("KEY") || key.contains("TOKEN") {
+            if value.len() > 10 {
+                format!("{}...{}", &value[..6], &value[value.len()-4..])
+            } else {
+                "***".to_string()
+            }
+        } else {
+            value.clone()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} = ", key), dim),
+            Span::raw(display),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 // ---------------------------------------------------------------------------

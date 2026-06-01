@@ -47,6 +47,7 @@ pub struct App {
     pub create_status_is_error: bool,
 
     pub confirm_action: ConfirmAction,
+    pub expanded: bool,
 }
 
 impl App {
@@ -68,6 +69,7 @@ impl App {
             create_status: None,
             create_status_is_error: false,
             confirm_action: ConfirmAction::None,
+            expanded: false,
         }
     }
 
@@ -336,6 +338,7 @@ fn event_loop<W: Write>(
                                     app.confirm_action = ConfirmAction::DeleteBackend;
                                 }
                             }
+                            KeyCode::Tab => app.expanded = !app.expanded,
                             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => app.quit(),
                             _ => {}
                         },
