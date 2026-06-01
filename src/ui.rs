@@ -5,18 +5,42 @@ use ratatui::{
     widgets::*,
 };
 
-/// Compute the dialog height for a given terminal height.
+/// Maximum viewport height to reserve (always assumes expanded so the inline
+/// area is large enough when the user presses Tab).
+pub fn viewport_height(app: &App, terminal_height: u16) -> u16 {
+    let max_env_count = app
+        .backends
+        .iter()
+        .map(|b| b.env.len() as u16)
+        .max()
+        .unwrap_or(0);
+    calc_dialog_height(app.backends.len(), max_env_count, terminal_height, app.mode)
+}
+
+/// Compute the dialog rendering height for the current expand state.
 pub fn dialog_height(app: &App, terminal_height: u16) -> u16 {
     let env_count = if app.expanded && app.mode == Mode::Select && !app.backends.is_empty() {
         app.backends[app.selected].env.len() as u16
     } else {
         0
     };
-    let detail_extra: u16 = (env_count + 4).min(16);
-    match app.mode {
-        Mode::Select => ((app.backends.len() as u16) + 10 + detail_extra)
-            .max(15)
-            .min(terminal_height.saturating_sub(4)),
+    calc_dialog_height(app.backends.len(), env_count, terminal_height, app.mode)
+}
+
+fn calc_dialog_height(backend_count: usize, env_count: u16, terminal_height: u16, mode: Mode) -> u16 {
+    let detail_extra: u16 = if mode == Mode::Select {
+        (env_count + 4).min(16)
+    } else {
+        0
+    };
+    match mode {
+        Mode::Select => {
+            let list_rows = (backend_count as u16).min(10).max(3);
+            // header + list + gap + detail + hint + outer border
+            (1 + list_rows + 1 + detail_extra + 1 + 2)
+                .max(15)
+                .min(terminal_height.saturating_sub(4))
+        }
         Mode::Create => 15.min(terminal_height.saturating_sub(4)),
     }
 }

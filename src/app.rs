@@ -242,7 +242,7 @@ pub fn run_app(app: &mut App, config_dir: &std::path::Path, use_stderr: bool) ->
 fn run_on_stdout(app: &mut App, config_dir: &std::path::Path) -> io::Result<bool> {
     terminal::enable_raw_mode()?;
 
-    let height = ui::dialog_height(app, terminal::size()?.1);
+    let height = ui::viewport_height(app, terminal::size()?.1);
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::with_options(
         backend,
