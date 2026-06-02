@@ -33,9 +33,6 @@ struct Cli {
     #[arg(long)]
     shell_init: bool,
 
-    /// Show per-backend token usage statistics
-    #[arg(long)]
-    stats: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -44,13 +41,6 @@ fn main() -> anyhow::Result<()> {
     // --shell-init: print shell function and exit, no TUI needed
     if cli.shell_init {
         print_shell_init();
-        return Ok(());
-    }
-
-    // --stats: print token usage and exit, no TUI needed
-    if cli.stats {
-        let stats = tracker::scan_usage(&app_dir());
-        tracker::print_stats_table(&stats);
         return Ok(());
     }
 

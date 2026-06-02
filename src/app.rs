@@ -1,5 +1,6 @@
 use crate::checker::{self, CheckResult, CheckStatus};
 use crate::config::{discover_backends, save_backend_env, Backend};
+use crate::tracker::BackendStats;
 use crate::ui;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -9,6 +10,7 @@ use crossterm::{
 use ratatui::{prelude::*, TerminalOptions, Viewport};
 use std::io::{self, Write};
 use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 /// Which screen is currently active.
@@ -35,7 +37,9 @@ pub struct App {
     pub confirmed: bool,
 
     pub backend_status: Vec<CheckStatus>,
+    pub backend_stats: Option<Vec<BackendStats>>,
     check_rx: Option<mpsc::Receiver<CheckResult>>,
+    stats_rx: Option<mpsc::Receiver<Vec<BackendStats>>>,
 
     // Create-form fields
     pub create_name: String,
@@ -60,7 +64,9 @@ impl App {
             should_quit: false,
             confirmed: false,
             backend_status: vec![CheckStatus::Pending; count],
+            backend_stats: None,
             check_rx: None,
+            stats_rx: None,
             create_name: String::new(),
             create_base_url: String::new(),
             create_api_key: String::new(),
@@ -131,6 +137,32 @@ impl App {
                         reason: "Missing ANTHROPIC_BASE_URL or ANTHROPIC_API_KEY".into(),
                     };
                 }
+            }
+        }
+    }
+
+    /// Spawn a background thread to load token usage stats.
+    pub fn start_stats_scan(&mut self, config_dir: &std::path::Path) {
+        let (tx, rx) = mpsc::channel();
+        self.stats_rx = Some(rx);
+        self.backend_stats = None;
+
+        let config_dir = config_dir.to_path_buf();
+        thread::spawn(move || {
+            let stats = crate::tracker::scan_usage(&config_dir);
+            let _ = tx.send(stats);
+        });
+    }
+
+    /// Drain completed stats result from the channel.
+    pub fn poll_stats(&mut self) {
+        if let Some(rx) = &self.stats_rx {
+            match rx.try_recv() {
+                Ok(stats) => self.backend_stats = Some(stats),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.backend_stats = Some(vec![]);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
             }
         }
     }
@@ -286,9 +318,11 @@ fn event_loop<W: Write>(
     config_dir: &std::path::Path,
 ) -> io::Result<()> {
     app.start_checks();
+    app.start_stats_scan(config_dir);
 
     while !app.should_quit {
         app.poll_checks();
+        app.poll_stats();
         terminal.draw(|frame| ui::render(frame, app))?;
 
         if event::poll(Duration::from_millis(100))? {

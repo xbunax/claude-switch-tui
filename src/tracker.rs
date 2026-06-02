@@ -95,10 +95,6 @@ pub fn scan_usage(config_dir: &Path) -> Vec<BackendStats> {
         }
     }
 
-    if switches.is_empty() {
-        return vec![];
-    }
-
     // model -> (input, output, cache_read, cache_creation)
     type ModelTokens = HashMap<String, (u64, u64, u64, u64)>;
     let mut backend_tokens: HashMap<String, ModelTokens> = HashMap::new();
@@ -166,83 +162,6 @@ pub fn scan_usage(config_dir: &Path) -> Vec<BackendStats> {
     }
 
     results
-}
-
-// ---------------------------------------------------------------------------
-// Print token stats as a formatted table to stdout
-// ---------------------------------------------------------------------------
-
-pub fn print_stats_table(stats: &[BackendStats]) {
-    if stats.is_empty() {
-        println!("No token usage data yet.");
-        println!(
-            "Switch backends with 'cs' first, then use Claude Code normally.\n\
-             Run 'cs --stats' again after some usage."
-        );
-        return;
-    }
-
-    // Header
-    println!(
-        "{:<20} {:<22} {:>12} {:>12} {:>12} {:>12}",
-        "Backend", "Model", "Input", "Output", "Cache Read", "Total"
-    );
-    println!("{}", "-".repeat(90));
-
-    for s in stats {
-        let backend_display = if s.backend.len() > 18 {
-            format!("{}..", &s.backend[..16])
-        } else {
-            s.backend.clone()
-        };
-
-        if s.models.is_empty() {
-            println!(
-                "{:<20} {:<22} {:>12} {:>12} {:>12} {:>12}",
-                backend_display,
-                "-",
-                fmt_count(s.total_input),
-                fmt_count(s.total_output),
-                fmt_count(s.total_cache_read),
-                fmt_count(s.grand_total),
-            );
-        } else {
-            for (i, m) in s.models.iter().enumerate() {
-                let backend_col = if i == 0 {
-                    backend_display.clone()
-                } else {
-                    String::new()
-                };
-                let model_display = if m.model.len() > 20 {
-                    format!("{}..", &m.model[..18])
-                } else {
-                    m.model.clone()
-                };
-                println!(
-                    "{:<20} {:<22} {:>12} {:>12} {:>12} {:>12}",
-                    backend_col,
-                    model_display,
-                    fmt_count(m.input_tokens),
-                    fmt_count(m.output_tokens),
-                    fmt_count(m.cache_read),
-                    fmt_count(m.total),
-                );
-            }
-        }
-
-        // Subtotal line
-        if s.models.len() > 1 {
-            println!(
-                "{:<20} {:<22} {:>12} {:>12} {:>12} {:>12}",
-                "",
-                "(subtotal)",
-                fmt_count(s.total_input),
-                fmt_count(s.total_output),
-                fmt_count(s.total_cache_read),
-                fmt_count(s.grand_total),
-            );
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +300,7 @@ fn build_stats(backend: String, models: HashMap<String, (u64, u64, u64, u64)>) -
     }
 }
 
-fn fmt_count(n: u64) -> String {
+pub(crate) fn fmt_count(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {

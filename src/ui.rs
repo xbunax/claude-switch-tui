@@ -1,5 +1,6 @@
 use crate::app::{App, ConfirmAction, Mode};
 use crate::checker::CheckStatus;
+use crate::tracker;
 use ratatui::{
     prelude::*,
     widgets::*,
@@ -29,7 +30,7 @@ pub fn dialog_height(app: &App, terminal_height: u16) -> u16 {
 
 fn calc_dialog_height(backend_count: usize, env_count: u16, terminal_height: u16, mode: Mode) -> u16 {
     let detail_extra: u16 = if mode == Mode::Select {
-        (env_count + 4).min(16)
+        (env_count + 10).min(30)  // +10 for token usage section below env vars
     } else {
         0
     };
@@ -38,7 +39,7 @@ fn calc_dialog_height(backend_count: usize, env_count: u16, terminal_height: u16
             let list_rows = (backend_count as u16).min(10).max(3);
             // header + list + gap + detail + hint + outer border
             (1 + list_rows + 1 + detail_extra + 1 + 2)
-                .max(15)
+                .max(20)
                 .min(terminal_height.saturating_sub(4))
         }
         Mode::Create => 15.min(terminal_height.saturating_sub(4)),
@@ -226,7 +227,6 @@ fn render_detail_panel(frame: &mut Frame, area: Rect, app: &App) {
         CheckStatus::Skipped { reason } => reason.clone(),
     };
     lines.push(Line::from(vec![Span::styled(models_text, cyan.add_modifier(Modifier::BOLD))]));
-    lines.push(Line::raw(""));
 
     // Env vars
     let mut keys: Vec<&String> = backend.env.keys().collect();
@@ -246,6 +246,80 @@ fn render_detail_panel(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("  {} = ", key), dim),
             Span::raw(display),
         ]));
+    }
+
+    // Token usage (loaded async via background thread)
+    lines.push(Line::raw(""));
+    match &app.backend_stats {
+        None => {
+            lines.push(Line::from(vec![Span::styled(
+                " Token usage: scanning...",
+                dim,
+            )]));
+        }
+        Some(all_stats) if all_stats.is_empty() => {
+            lines.push(Line::from(vec![Span::styled(
+                " No token usage data found.",
+                dim,
+            )]));
+            lines.push(Line::from(vec![Span::styled(
+                " Start a Claude Code session to collect usage data.",
+                Style::default().add_modifier(Modifier::DIM),
+            )]));
+        }
+        Some(all_stats) => {
+            let stats = all_stats
+                .iter()
+                .find(|s| s.backend == backend.name)
+                .or_else(|| all_stats.iter().find(|s| s.backend == "(unattributed)"));
+            match stats {
+                Some(s) if !s.models.is_empty() => {
+                    lines.push(Line::from(vec![Span::styled(
+                        "── Token Usage ──",
+                        Style::default().fg(Color::Green),
+                    )]));
+                    for m in &s.models {
+                        let model_label = if m.model.len() > 28 {
+                            format!("{}..", &m.model[..26])
+                        } else {
+                            m.model.clone()
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("  {} ", model_label), cyan),
+                            Span::raw(format!(
+                                "{} in / {} out / {} cache / {} total",
+                                tracker::fmt_count(m.input_tokens),
+                                tracker::fmt_count(m.output_tokens),
+                                tracker::fmt_count(m.cache_read),
+                                tracker::fmt_count(m.total),
+                            )),
+                        ]));
+                    }
+                    lines.push(Line::from(vec![
+                        Span::styled("  Total  ", bold),
+                        Span::raw(format!(
+                            "{} in / {} out / {} cache / {} total",
+                            tracker::fmt_count(s.total_input),
+                            tracker::fmt_count(s.total_output),
+                            tracker::fmt_count(s.total_cache_read),
+                            tracker::fmt_count(s.grand_total),
+                        )),
+                    ]));
+                }
+                Some(_) => {
+                    lines.push(Line::from(vec![Span::styled(
+                        " No model usage data for this backend yet.",
+                        dim,
+                    )]));
+                }
+                None => {
+                    lines.push(Line::from(vec![Span::styled(
+                        " No token usage data for this backend.",
+                        dim,
+                    )]));
+                }
+            }
+        }
     }
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
