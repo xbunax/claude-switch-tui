@@ -1,6 +1,7 @@
 mod app;
 mod checker;
 mod config;
+mod tracker;
 mod ui;
 
 use clap::Parser;
@@ -31,6 +32,10 @@ struct Cli {
     /// Usage: claude-switch --shell-init >> ~/.zshrc && source ~/.zshrc
     #[arg(long)]
     shell_init: bool,
+
+    /// Show per-backend token usage statistics
+    #[arg(long)]
+    stats: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -39,6 +44,13 @@ fn main() -> anyhow::Result<()> {
     // --shell-init: print shell function and exit, no TUI needed
     if cli.shell_init {
         print_shell_init();
+        return Ok(());
+    }
+
+    // --stats: print token usage and exit, no TUI needed
+    if cli.stats {
+        let stats = tracker::scan_usage(&app_dir());
+        tracker::print_stats_table(&stats);
         return Ok(());
     }
 
@@ -74,10 +86,36 @@ fn main() -> anyhow::Result<()> {
     let backend = app_state.selected_backend();
     write_env_file(&env_file, backend)?;
 
+    // Record the backend switch for token usage tracking
+    tracker::record_switch(&config_dir, &backend.name);
+
     if cli.eval {
         // stdout: only export statements (consumed by eval)
         // stderr: human-readable status
         eprintln!("Switched to: {}", backend.name);
+
+        // Unset previously-exported keys to avoid cross-backend pollution
+        if env_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(&env_file) {
+                let old_keys: Vec<&str> = content
+                    .lines()
+                    .filter_map(|line| {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() || trimmed.starts_with('#') {
+                            return None;
+                        }
+                        trimmed
+                            .strip_prefix("export ")
+                            .and_then(|rest| rest.split_once('=').map(|(k, _)| k))
+                    })
+                    .collect();
+                if !old_keys.is_empty() {
+                    let sorted: std::collections::BTreeSet<_> = old_keys.into_iter().collect();
+                    println!("unset {}", sorted.into_iter().collect::<Vec<_>>().join(" "));
+                }
+            }
+        }
+
         let mut keys: Vec<&String> = backend.env.keys().collect();
         keys.sort();
         for key in keys {
