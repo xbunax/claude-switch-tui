@@ -84,6 +84,20 @@ fn main() -> anyhow::Result<()> {
         // stdout: only export statements (consumed by eval)
         // stderr: human-readable status
         eprintln!("Switched to: {}", backend.name);
+        let sentinel = config_dir.join(".setup-shown");
+        if !sentinel.exists() {
+            eprintln!("Environment file: {}", env_file.display());
+            eprintln!(
+                "Activate in current shell: source {}",
+                shell_quote(&env_file.display().to_string())
+            );
+            eprintln!();
+            eprintln!(
+                "Tip: run {} --shell-init >> ~/.zshrc to set up the cs command for instant switching",
+                current_exe_name()
+            );
+            let _ = fs::write(&sentinel, "");
+        }
 
         // Unset previously-exported keys to avoid cross-backend pollution
         if env_file.exists() {
