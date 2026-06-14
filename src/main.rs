@@ -6,6 +6,7 @@ mod ui;
 
 use clap::Parser;
 use config::{app_dir, default_env_path, discover_backends, expand_path, init_config, shell_quote, write_env_file};
+use std::fs;
 use std::process;
 
 /// Switch Claude Code backend environment variables via TUI
@@ -113,16 +114,20 @@ fn main() -> anyhow::Result<()> {
         }
     } else {
         println!("Switched to: {}", backend.name);
-        println!("Environment file: {}", env_file.display());
-        println!(
-            "Activate in current shell: source {}",
-            shell_quote(&env_file.display().to_string())
-        );
-        println!();
-        println!(
-            "Tip: run {} --shell-init >> ~/.zshrc to set up the cs command for instant switching",
-            current_exe_name()
-        );
+        let sentinel = config_dir.join(".setup-shown");
+        if !sentinel.exists() {
+            println!("Environment file: {}", env_file.display());
+            println!(
+                "Activate in current shell: source {}",
+                shell_quote(&env_file.display().to_string())
+            );
+            println!();
+            println!(
+                "Tip: run {} --shell-init >> ~/.zshrc to set up the cs command for instant switching",
+                current_exe_name()
+            );
+            let _ = fs::write(&sentinel, "");
+        }
     }
 
     Ok(())
