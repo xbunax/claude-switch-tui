@@ -1,4 +1,4 @@
-use crate::app::{App, ConfirmAction, Mode};
+use crate::app::{App, ConfirmAction, CreateAuthType, Mode};
 use crate::checker::CheckStatus;
 use crate::tracker;
 use ratatui::{
@@ -248,6 +248,11 @@ fn render_detail_panel(frame: &mut Frame, area: Rect, app: &App) {
         ]));
     }
 
+    // ChatGPT OAuth account info (best-effort, loaded on refresh)
+    if let Some(info) = app.oauth_infos.get(app.selected).and_then(|o| o.as_ref()) {
+        lines.push(Line::from(vec![Span::styled(format!("  {}", info), dim)]));
+    }
+
     // Token usage (loaded async via background thread)
     lines.push(Line::raw(""));
     match &app.backend_stats {
@@ -333,32 +338,49 @@ fn render_create(frame: &mut Frame, area: Rect, app: &App) {
     let label_style = Style::default().add_modifier(Modifier::BOLD);
     let active_style = Style::default().add_modifier(Modifier::REVERSED);
     let inactive_style = Style::default();
+    let cursor_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
 
-    let field_style = |idx: usize| {
-        if idx == app.create_active_field {
+    // Helper to render a labelled input field
+    let field = |label: &str, value: &str, idx: usize| -> Line<'static> {
+        let style = if idx == app.create_active_field {
             active_style
         } else {
             inactive_style
-        }
-    };
-
-    let cursor_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-
-    // Helper to render a labelled field
-    let field = |label: &str, value: &str, idx: usize| -> Line<'static> {
+        };
         let mut spans = vec![Span::styled(label.to_string(), label_style)];
-        spans.push(Span::styled(value.to_string(), field_style(idx)));
+        spans.push(Span::styled(value.to_string(), style));
         if idx == app.create_active_field {
             spans.push(Span::styled("█", cursor_style));
         }
         Line::from(spans)
     };
 
+    // Auth type selector: a focusable row (Tab to it, ←/→ to change it)
+    let auth_focused = app.create_active_field == app.auth_field_index();
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let (api_style, oauth_style) = match app.create_auth_type {
+        CreateAuthType::ApiKey => (active_style, inactive_style),
+        CreateAuthType::ChatgptOauth => (inactive_style, active_style),
+    };
+    let mut auth_spans = vec![
+        Span::styled(" Auth:      [ ", label_style),
+        Span::styled("API Key", api_style),
+        Span::styled(" | ", if auth_focused { active_style } else { dim }),
+        Span::styled("ChatGPT OAuth", oauth_style),
+        Span::styled(" ]", if auth_focused { active_style } else { Style::default() }),
+    ];
+    auth_spans.push(Span::styled(
+        if auth_focused { "  ←/→ change" } else { "  (Tab here to change)" },
+        dim,
+    ));
+    let auth_row = Line::from(auth_spans);
+
     let rows = Layout::vertical([
         Constraint::Length(1),  // name
-        Constraint::Length(1),  // base url
-        Constraint::Length(1),  // api key
-        Constraint::Length(1),  // description
+        Constraint::Length(1),  // auth selector
+        Constraint::Length(1),  // field: base url (api) / description (oauth)
+        Constraint::Length(1),  // field: api key (api) / blank
+        Constraint::Length(1),  // field: description (api) / blank
         Constraint::Length(1),  // spacer
         Constraint::Length(1),  // status
         Constraint::Length(1),  // spacer
@@ -367,12 +389,25 @@ fn render_create(frame: &mut Frame, area: Rect, app: &App) {
     .split(area);
 
     frame.render_widget(Paragraph::new(field(" Name:       ", &app.create_name, 0)), rows[0]);
-    frame.render_widget(Paragraph::new(field(" Base URL:   ", &app.create_base_url, 1)), rows[1]);
-    frame.render_widget(Paragraph::new(field(" API Key:    ", &app.create_api_key, 2)), rows[2]);
-    frame.render_widget(Paragraph::new(field(" Description:", &app.create_description, 3)), rows[3]);
+    frame.render_widget(Paragraph::new(auth_row), rows[1]);
+
+    match app.create_auth_type {
+        CreateAuthType::ApiKey => {
+            frame.render_widget(Paragraph::new(field(" Base URL:   ", &app.create_base_url, 1)), rows[2]);
+            frame.render_widget(Paragraph::new(field(" API Key:    ", &app.create_api_key, 2)), rows[3]);
+            frame.render_widget(Paragraph::new(field(" Description:", &app.create_description, 3)), rows[4]);
+        }
+        CreateAuthType::ChatgptOauth => {
+            frame.render_widget(Paragraph::new(field(" Description:", &app.create_description, 1)), rows[2]);
+        }
+    }
 
     // Status message
-    if let Some(ref msg) = app.create_status {
+    if app.oauth_in_progress {
+        let status = Paragraph::new("Waiting for browser login… complete it in the browser (120s timeout)")
+            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        frame.render_widget(status, rows[6]);
+    } else if let Some(ref msg) = app.create_status {
         let color = if app.create_status_is_error {
             Color::Red
         } else {
@@ -380,13 +415,22 @@ fn render_create(frame: &mut Frame, area: Rect, app: &App) {
         };
         let status = Paragraph::new(msg.as_str())
             .style(Style::default().fg(color).add_modifier(Modifier::BOLD));
-        frame.render_widget(status, rows[5]);
+        frame.render_widget(status, rows[6]);
+    } else if app.create_auth_type == CreateAuthType::ChatgptOauth {
+        // ToS warning shown whenever the OAuth type is selected
+        let warn = Paragraph::new("Unofficial ChatGPT-subscription use — may be throttled or revoked (ToS risk)")
+            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM));
+        frame.render_widget(warn, rows[6]);
     }
 
     // Hint
-    let hint = Paragraph::new("Tab/↓ Next  ↑ Prev  Enter Save  ←/→ Tab  q/Esc Quit")
-        .style(Style::default().add_modifier(Modifier::DIM));
-    frame.render_widget(hint, rows[7]);
+    let hint_text = if auth_focused {
+        "←/→ Change Auth  Tab/↓ Next  ↑ Prev  Enter Save  Esc Quit"
+    } else {
+        "Tab/↓ Next  ↑ Prev  Enter Save  ←/→ Switch Tab  q/Esc Quit"
+    };
+    let hint = Paragraph::new(hint_text).style(Style::default().add_modifier(Modifier::DIM));
+    frame.render_widget(hint, rows[8]);
 }
 
 // ---------------------------------------------------------------------------

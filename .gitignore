@@ -3,6 +3,7 @@ backends.json
 __pycache__/
 .venv/
 .uv-cache/
+.DS_Store
 
 
 # Added by cargo

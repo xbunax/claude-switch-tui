@@ -286,6 +286,220 @@ pub fn save_backend_env(
 }
 
 // ---------------------------------------------------------------------------
+// ChatGPT (Codex OAuth) backends
+// ---------------------------------------------------------------------------
+
+/// Marker value for the `CS_BACKEND_KIND` key identifying an OAuth backend.
+pub const CS_BACKEND_KIND_OAUTH: &str = "chatgpt-oauth";
+
+/// Default port of the built-in Anthropic↔ChatGPT translation proxy.
+pub const DEFAULT_PROXY_PORT: u16 = 18765;
+
+/// Fallback model ids used when the ChatGPT catalog lookup at login fails.
+/// Model names change often — these live here so they're easy to bump.
+/// Fallbacks used only when the login-time catalog fetch fails; the real ids
+/// are captured from the account's catalog at login and written into the
+/// backend's `.env`. Upstream renames models regularly.
+pub const DEFAULT_MAIN_MODEL: &str = "gpt-6-astra";
+pub const DEFAULT_SMALL_MODEL: &str = "gpt-5.5";
+
+/// True when the backend is a ChatGPT OAuth backend (uses the local proxy).
+pub fn is_oauth_backend(backend: &Backend) -> bool {
+    backend
+        .env
+        .get("CS_BACKEND_KIND")
+        .map(|v| v == CS_BACKEND_KIND_OAUTH)
+        .unwrap_or(false)
+}
+
+/// Path of the sibling credential file for an OAuth backend.
+pub fn oauth_json_path(config_dir: &Path, name: &str) -> PathBuf {
+    config_dir.join(format!("{}.oauth.json", name))
+}
+
+/// Clone a backend with all internal `CS_*` keys removed — these must never
+/// reach `claude.env` or the shell.
+pub fn strip_cs_keys(backend: &Backend) -> Backend {
+    let env = backend
+        .env
+        .iter()
+        .filter(|(k, _)| !k.starts_with("CS_"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    Backend {
+        name: backend.name.clone(),
+        description: backend.description.clone(),
+        env,
+    }
+}
+
+/// Load a single backend `.env` file by path (used by `--serve`).
+pub fn load_backend_file(path: &Path) -> anyhow::Result<Backend> {
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    let env = parse_dotenv_file(path)?;
+    Ok(Backend {
+        name,
+        description: path.display().to_string(),
+        env,
+    })
+}
+
+/// Generate a 64-char random hex nonce for `ANTHROPIC_AUTH_TOKEN`. Its value
+/// is ignored by the proxy — presence is what matters (it outranks any
+/// stored `/login` credentials in Claude Code).
+pub fn random_hex_nonce() -> String {
+    let mut bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Write a ChatGPT OAuth backend `.env` file. The credential tokens live in
+/// the sibling `{name}.oauth.json`, never in the env file.
+pub fn save_oauth_backend_env(
+    config_dir: &Path,
+    name: &str,
+    description: &str,
+    main_model: &str,
+    mid_model: &str,
+    small_model: &str,
+) -> anyhow::Result<PathBuf> {
+    fs::create_dir_all(config_dir)?;
+    let path = config_dir.join(format!("{}.env", name));
+    let content = format!(
+        "# {}\n\
+         CS_BACKEND_KIND={}\n\
+         ANTHROPIC_BASE_URL=http://127.0.0.1:{}\n\
+         ANTHROPIC_AUTH_TOKEN={}\n\
+         ANTHROPIC_MODEL={}\n\
+         {}\
+         CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1\n\
+         CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1\n\
+         CLAUDE_CODE_ATTRIBUTION_HEADER=0\n\
+         CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000\n",
+        description,
+        CS_BACKEND_KIND_OAUTH,
+        DEFAULT_PROXY_PORT,
+        random_hex_nonce(),
+        main_model,
+        extra_key_lines(main_model, mid_model, small_model),
+    );
+    fs::write(&path, content)?;
+    Ok(path)
+}
+
+/// Keys an OAuth backend needs on top of the base env, with the value to use
+/// when the key is absent. Existing keys are never rewritten, so hand-tuned
+/// values survive.
+///
+/// The role keys retarget Claude Code's built-in Opus/Sonnet/Haiku rows at
+/// GPT models — without them those rows would send `claude-opus-5` &co. to the
+/// proxy, which can only fall back to the main model. They do *not* add rows.
+/// The rows themselves come from gateway model discovery, which is off by
+/// default and is what `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` turns on:
+/// Claude Code then reads our `GET /v1/models` and lists every entry whose id
+/// contains `claude` or `anthropic` (the proxy already aliases them as
+/// `claude-…` for exactly this reason).
+fn oauth_extra_keys(main: &str, mid: &str, small: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", main.to_string()),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL", mid.to_string()),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", small.to_string()),
+        ("ANTHROPIC_SMALL_FAST_MODEL", small.to_string()),
+        ("CLAUDE_CODE_SUBAGENT_MODEL", mid.to_string()),
+        ("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1".to_string()),
+    ]
+}
+
+fn extra_key_lines(main: &str, mid: &str, small: &str) -> String {
+    oauth_extra_keys(main, mid, small)
+        .iter()
+        .map(|(k, v)| format!("{}={}\n", k, v))
+        .collect()
+}
+
+/// Does the file already define `key`? Handles `export ` prefixes and spacing.
+fn has_key(content: &str, key: &str) -> bool {
+    content.lines().any(|line| {
+        let t = line.trim();
+        let t = t.strip_prefix("export ").unwrap_or(t).trim_start();
+        t.starts_with(key) && t[key.len()..].trim_start().starts_with('=')
+    })
+}
+
+/// Backfill keys an OAuth backend's `.env` is missing, leaving everything else
+/// — including values the user edited — untouched. Returns whether it wrote.
+///
+/// Backends created before these keys existed only carry `ANTHROPIC_MODEL`, so
+/// their picker offers a single model until this runs.
+pub fn ensure_model_roles(path: &Path, main: &str, mid: &str, small: &str) -> anyhow::Result<bool> {
+    let content = fs::read_to_string(path)?;
+    let missing = extra_key_lines(main, mid, small)
+        .lines()
+        .filter(|l| {
+            let key = l.split('=').next().unwrap_or("");
+            !has_key(&content, key)
+        })
+        .map(String::from)
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(false);
+    }
+    let block: String = missing.iter().map(|l| format!("{}\n", l)).collect();
+
+    // Insert right after ANTHROPIC_MODEL to keep the file readable.
+    let mut out = String::new();
+    let mut inserted = false;
+    for line in content.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if !inserted && line.trim_start().starts_with("ANTHROPIC_MODEL") {
+            out.push_str(&block);
+            inserted = true;
+        }
+    }
+    if !inserted {
+        // No ANTHROPIC_MODEL line (hand-written file): append instead.
+        out.push_str(&block);
+    }
+    fs::write(path, out)?;
+    Ok(true)
+}
+
+/// Update one key in a `.env` file in place, preserving comments, `export`
+/// prefixes on other lines, and ordering.
+pub fn rewrite_env_value(path: &Path, key: &str, value: &str) -> anyhow::Result<()> {
+    let content = fs::read_to_string(path)?;
+    let mut out = String::new();
+    let mut replaced = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let bare = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        if let Some((k, _)) = bare.split_once('=') {
+            if k.trim() == key {
+                out.push_str(&format!("{}={}\n", key, value));
+                replaced = true;
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !replaced {
+        out.push_str(&format!("{}={}\n", key, value));
+    }
+    fs::write(path, out)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -488,6 +702,189 @@ mod tests {
         assert!(content.contains("# Test API"));
         assert!(content.contains("ANTHROPIC_BASE_URL=https://api.example.com"));
         assert!(content.contains("ANTHROPIC_API_KEY=sk-key"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_oauth_backend_env_roundtrip() {
+        let dir = std::env::temp_dir().join("claude-switch-test-oauth-env");
+        let _ = fs::remove_dir_all(&dir);
+
+        let path = save_oauth_backend_env(
+            &dir,
+            "gpt",
+            "ChatGPT via OAuth",
+            "gpt-main",
+            "gpt-mid",
+            "gpt-small",
+        )
+        .unwrap();
+        assert_eq!(path, dir.join("gpt.env"));
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("CS_BACKEND_KIND=chatgpt-oauth"));
+        assert!(content.contains("ANTHROPIC_AUTH_TOKEN="));
+        assert!(content.contains("ANTHROPIC_MODEL=gpt-main"));
+        // The role keys are what make more than one model selectable in
+        // Claude Code's /model picker.
+        assert!(content.contains("ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-main"));
+        assert!(content.contains("ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-mid"));
+        assert!(content.contains("ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-small"));
+        assert!(content.contains("ANTHROPIC_SMALL_FAST_MODEL=gpt-small"));
+        assert!(content.contains("CLAUDE_CODE_SUBAGENT_MODEL=gpt-mid"));
+        assert!(content.contains("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1"));
+
+        // Round-trips through discovery and is recognized as an OAuth backend
+        let backends = discover_backends(&dir).unwrap();
+        assert_eq!(backends.len(), 1);
+        assert!(is_oauth_backend(&backends[0]));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_ensure_model_roles_upgrades_legacy_env() {
+        let dir = std::env::temp_dir().join("claude-switch-test-roles-migrate");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // A backend as written before the role keys existed.
+        let path = dir.join("gpt.env");
+        fs::write(
+            &path,
+            "# ChatGPT\nCS_BACKEND_KIND=chatgpt-oauth\nANTHROPIC_BASE_URL=http://127.0.0.1:18765\n\
+             ANTHROPIC_MODEL=gpt-6-astra\nANTHROPIC_SMALL_FAST_MODEL=gpt-5.5\n",
+        )
+        .unwrap();
+
+        assert!(ensure_model_roles(&path, "gpt-6-astra", "gpt-6-sol", "gpt-5.5").unwrap());
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-6-astra"));
+        assert!(content.contains("ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-6-sol"));
+        assert!(content.contains("ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-5.5"));
+        // Discovery is what actually adds picker rows; without it the roles
+        // above only retarget the built-in rows.
+        assert!(content.contains("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1"));
+        // The pre-existing SMALL_FAST line is kept as-is, not duplicated.
+        assert_eq!(content.matches("ANTHROPIC_SMALL_FAST_MODEL").count(), 1);
+        assert!(content.contains("ANTHROPIC_SMALL_FAST_MODEL=gpt-5.5"));
+        assert_eq!(content.matches("ANTHROPIC_MODEL=").count(), 1);
+        // Inserted as a block right after ANTHROPIC_MODEL, nothing else moved.
+        let model_line = content.find("ANTHROPIC_MODEL=gpt-6-astra").unwrap();
+        let opus_line = content.find("ANTHROPIC_DEFAULT_OPUS_MODEL").unwrap();
+        let base_line = content.find("ANTHROPIC_BASE_URL").unwrap();
+        assert!(base_line < model_line && model_line < opus_line);
+
+        // Idempotent: a second call leaves the file alone.
+        let before = fs::read_to_string(&path).unwrap();
+        assert!(!ensure_model_roles(&path, "x", "y", "z").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Backfill must not clobber a value the user edited by hand.
+    #[test]
+    fn test_ensure_model_roles_preserves_existing_values() {
+        let dir = std::env::temp_dir().join("claude-switch-test-roles-preserve");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gpt.env");
+        fs::write(
+            &path,
+            "ANTHROPIC_MODEL=gpt-6-astra\nANTHROPIC_SMALL_FAST_MODEL=hand-picked\n",
+        )
+        .unwrap();
+
+        assert!(ensure_model_roles(&path, "gpt-6-astra", "gpt-6-sol", "gpt-5.5").unwrap());
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("ANTHROPIC_SMALL_FAST_MODEL=hand-picked"));
+        assert!(!content.contains("ANTHROPIC_SMALL_FAST_MODEL=gpt-5.5"));
+        // ...while the genuinely missing keys still get filled in.
+        assert!(content.contains("ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-5.5"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_ensure_model_roles_appends_when_no_model_line() {
+        let dir = std::env::temp_dir().join("claude-switch-test-roles-append");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("odd.env");
+        fs::write(&path, "ANTHROPIC_BASE_URL=http://127.0.0.1:18765\n").unwrap();
+
+        assert!(ensure_model_roles(&path, "a", "b", "c").unwrap());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("ANTHROPIC_DEFAULT_OPUS_MODEL=a"));
+        assert!(content.contains("CLAUDE_CODE_SUBAGENT_MODEL=b"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_strip_cs_keys() {
+        let backend = Backend {
+            name: "gpt".into(),
+            description: "".into(),
+            env: HashMap::from([
+                ("CS_BACKEND_KIND".into(), "chatgpt-oauth".into()),
+                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:1".into()),
+            ]),
+        };
+        let stripped = strip_cs_keys(&backend);
+        assert!(!stripped.env.contains_key("CS_BACKEND_KIND"));
+        assert!(stripped.env.contains_key("ANTHROPIC_BASE_URL"));
+    }
+
+    #[test]
+    fn test_rewrite_env_value() {
+        let dir = std::env::temp_dir().join("claude-switch-test-rewrite");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("b.env");
+        fs::write(
+            &path,
+            "# comment\nANTHROPIC_BASE_URL=http://127.0.0.1:18765\nANTHROPIC_AUTH_TOKEN=x\n",
+        )
+        .unwrap();
+
+        rewrite_env_value(&path, "ANTHROPIC_BASE_URL", "http://127.0.0.1:18799").unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# comment"));
+        assert!(content.contains("ANTHROPIC_BASE_URL=http://127.0.0.1:18799"));
+        assert!(!content.contains("18765"));
+        assert!(content.contains("ANTHROPIC_AUTH_TOKEN=x"));
+
+        // Missing key gets appended
+        rewrite_env_value(&path, "CS_PROXY_PORT", "19000").unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("CS_PROXY_PORT=19000"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_random_hex_nonce() {
+        let a = random_hex_nonce();
+        let b = random_hex_nonce();
+        assert_eq!(a.len(), 64);
+        assert_ne!(a, b);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_load_backend_file() {
+        let dir = std::env::temp_dir().join("claude-switch-test-load");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("loaded.env");
+        fs::write(&path, "KEY_A=val_a\n").unwrap();
+
+        let backend = load_backend_file(&path).unwrap();
+        assert_eq!(backend.name, "loaded");
+        assert_eq!(backend.env.get("KEY_A").unwrap(), "val_a");
 
         let _ = fs::remove_dir_all(&dir);
     }

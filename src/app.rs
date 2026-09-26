@@ -1,5 +1,7 @@
 use crate::checker::{self, CheckResult, CheckStatus};
-use crate::config::{discover_backends, save_backend_env, Backend};
+use crate::config::{self, discover_backends, save_backend_env, Backend};
+use crate::daemon;
+use crate::oauth::{self, OauthOutcome};
 use crate::tracker::BackendStats;
 use crate::ui;
 use crossterm::{
@@ -28,6 +30,13 @@ pub enum ConfirmAction {
     SaveBackend,
 }
 
+/// Auth method for the create form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateAuthType {
+    ApiKey,
+    ChatgptOauth,
+}
+
 /// Application state for the TUI.
 pub struct App {
     pub mode: Mode,
@@ -49,6 +58,14 @@ pub struct App {
     pub create_active_field: usize,
     pub create_status: Option<String>,
     pub create_status_is_error: bool,
+    pub create_auth_type: CreateAuthType,
+    pub oauth_in_progress: bool,
+    oauth_rx: Option<mpsc::Receiver<OauthOutcome>>,
+    oauth_pending_name: String,
+    oauth_pending_desc: String,
+
+    /// One-line ChatGPT account info per backend (OAuth backends only).
+    pub oauth_infos: Vec<Option<String>>,
 
     pub confirm_action: ConfirmAction,
     pub expanded: bool,
@@ -74,6 +91,12 @@ impl App {
             create_active_field: 0,
             create_status: None,
             create_status_is_error: false,
+            create_auth_type: CreateAuthType::ApiKey,
+            oauth_in_progress: false,
+            oauth_rx: None,
+            oauth_pending_name: String::new(),
+            oauth_pending_desc: String::new(),
+            oauth_infos: vec![None; count],
             confirm_action: ConfirmAction::None,
             expanded: false,
         }
@@ -110,7 +133,32 @@ impl App {
             self.selected = self.selected.min(self.backends.len().saturating_sub(1));
             self.backend_status = vec![CheckStatus::Pending; self.backends.len()];
         }
+        self.refresh_oauth_infos(config_dir);
         self.start_checks();
+    }
+
+    /// Load one-line ChatGPT account info per OAuth backend (best-effort).
+    pub fn refresh_oauth_infos(&mut self, config_dir: &std::path::Path) {
+        self.oauth_infos = self
+            .backends
+            .iter()
+            .map(|b| {
+                if !config::is_oauth_backend(b) {
+                    return None;
+                }
+                match oauth::load_credentials(config_dir, &b.name) {
+                    Some(c) => {
+                        let who = c
+                            .email
+                            .or(c.account_id)
+                            .unwrap_or_else(|| "unknown account".into());
+                        let plan = c.plan_type.as_deref().unwrap_or("unknown plan");
+                        Some(format!("ChatGPT OAuth: {} ({})", who, plan))
+                    }
+                    None => Some("ChatGPT OAuth: not logged in".to_string()),
+                }
+            })
+            .collect();
     }
 
     /// Spawn check threads for all backends.
@@ -176,6 +224,10 @@ impl App {
         // Use the description (file path) to know which file to delete
         let path = std::path::PathBuf::from(&backend.description);
         let _ = std::fs::remove_file(&path);
+        // OAuth backends keep credentials in a sibling file; drop those and
+        // any running proxy daemon too.
+        let _ = std::fs::remove_file(config::oauth_json_path(config_dir, &backend.name));
+        daemon::kill_daemon(config_dir, &backend.name);
         self.confirm_action = ConfirmAction::None;
         self.refresh_backends(config_dir);
     }
@@ -193,27 +245,63 @@ impl App {
     // Create-form methods
     // ------------------------------------------------------------------
 
-    fn create_field_mut(&mut self) -> &mut String {
-        match self.create_active_field {
-            0 => &mut self.create_name,
-            1 => &mut self.create_base_url,
-            2 => &mut self.create_api_key,
-            3 => &mut self.create_description,
-            _ => &mut self.create_name,
+    /// Number of focusable rows in the create form. The auth selector is the
+    /// last one; it holds no text, so `create_field_mut` returns None for it.
+    pub fn create_field_count(&self) -> usize {
+        match self.create_auth_type {
+            CreateAuthType::ApiKey => 5,      // name, base url, api key, description, auth
+            CreateAuthType::ChatgptOauth => 3, // name, description, auth
         }
+    }
+
+    /// Index of the auth selector row (always last).
+    pub fn auth_field_index(&self) -> usize {
+        self.create_field_count() - 1
+    }
+
+    /// The text buffer of the focused row, or None when the auth row is focused.
+    fn create_field_mut(&mut self) -> Option<&mut String> {
+        match (self.create_auth_type, self.create_active_field) {
+            (CreateAuthType::ApiKey, 1) => Some(&mut self.create_base_url),
+            (CreateAuthType::ApiKey, 2) => Some(&mut self.create_api_key),
+            (CreateAuthType::ApiKey, 3) | (CreateAuthType::ChatgptOauth, 1) => {
+                Some(&mut self.create_description)
+            }
+            // Row 0 is the name in both modes; the auth row accepts no text.
+            (_, 0) => Some(&mut self.create_name),
+            _ => None,
+        }
+    }
+
+    /// Flip the auth type (only meaningful while the auth row is focused).
+    pub fn toggle_auth_type(&mut self) {
+        self.create_auth_type = match self.create_auth_type {
+            CreateAuthType::ApiKey => CreateAuthType::ChatgptOauth,
+            CreateAuthType::ChatgptOauth => CreateAuthType::ApiKey,
+        };
+        // The row count changes; park the cursor on a row that still exists.
+        self.create_active_field = 0;
     }
 
     pub fn handle_create_key(&mut self, code: KeyCode) {
         match code {
-            KeyCode::Char(c) => self.create_field_mut().push(c),
+            KeyCode::Char(c) => {
+                if let Some(field) = self.create_field_mut() {
+                    field.push(c);
+                }
+            }
             KeyCode::Backspace => {
-                self.create_field_mut().pop();
+                if let Some(field) = self.create_field_mut() {
+                    field.pop();
+                }
             }
             KeyCode::Tab | KeyCode::Down => {
-                self.create_active_field = (self.create_active_field + 1) % 4;
+                let fields = self.create_field_count();
+                self.create_active_field = (self.create_active_field + 1) % fields;
             }
             KeyCode::Up => {
-                self.create_active_field = (self.create_active_field + 3) % 4;
+                let fields = self.create_field_count();
+                self.create_active_field = (self.create_active_field + fields - 1) % fields;
             }
             _ => {}
         }
@@ -228,34 +316,115 @@ impl App {
         self.create_active_field = 0;
         self.create_status = None;
         self.create_status_is_error = false;
+        self.create_auth_type = CreateAuthType::ApiKey;
+        self.oauth_in_progress = false;
+        self.oauth_rx = None;
+        self.oauth_pending_name.clear();
+        self.oauth_pending_desc.clear();
     }
 
     pub fn save_create_form(&mut self, config_dir: &std::path::Path) {
-        if self.create_name.trim().is_empty() {
+        let name = self.create_name.trim().to_string();
+        if name.is_empty() {
             self.create_status = Some("Name is required".into());
             self.create_status_is_error = true;
             return;
         }
 
-        match save_backend_env(
-            config_dir,
-            self.create_name.trim(),
-            self.create_base_url.trim(),
-            self.create_api_key.trim(),
-            self.create_description.trim(),
-        ) {
-            Ok(path) => {
-                self.create_status = Some(format!("Saved: {}", path.display()));
+        match self.create_auth_type {
+            CreateAuthType::ApiKey => match save_backend_env(
+                config_dir,
+                &name,
+                self.create_base_url.trim(),
+                self.create_api_key.trim(),
+                self.create_description.trim(),
+            ) {
+                Ok(path) => {
+                    self.create_status = Some(format!("Saved: {}", path.display()));
+                    self.create_status_is_error = false;
+                    self.reset_create_form();
+                    self.refresh_backends(config_dir);
+                    self.mode = Mode::Select;
+                }
+                Err(e) => {
+                    self.create_status = Some(format!("Error: {}", e));
+                    self.create_status_is_error = true;
+                }
+            },
+            CreateAuthType::ChatgptOauth => {
+                if self.backends.iter().any(|b| b.name == name) {
+                    self.create_status = Some(format!("Backend '{}' already exists", name));
+                    self.create_status_is_error = true;
+                    return;
+                }
+                self.oauth_pending_name = name;
+                self.oauth_pending_desc = self.create_description.trim().to_string();
+                let (rx, _handle) =
+                    oauth::start_login(config_dir.to_path_buf(), self.oauth_pending_name.clone());
+                self.oauth_rx = Some(rx);
+                self.oauth_in_progress = true;
+                self.create_status =
+                    Some("Waiting for browser login… (auto-opens; 120s timeout)".into());
                 self.create_status_is_error = false;
-                self.reset_create_form();
-                self.refresh_backends(config_dir);
-                self.mode = Mode::Select;
-            }
-            Err(e) => {
-                self.create_status = Some(format!("Error: {}", e));
-                self.create_status_is_error = true;
             }
         }
+    }
+
+    /// Drain a completed OAuth login and persist the new backend.
+    pub fn poll_oauth(&mut self, config_dir: &std::path::Path) {
+        let Some(rx) = &self.oauth_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(OauthOutcome::Success { roles, .. }) => {
+                self.oauth_rx = None;
+                self.oauth_in_progress = false;
+                match config::save_oauth_backend_env(
+                    config_dir,
+                    &self.oauth_pending_name,
+                    &self.oauth_pending_desc,
+                    &roles.main,
+                    &roles.mid,
+                    &roles.small,
+                ) {
+                    Ok(path) => {
+                        self.create_status =
+                            Some(format!("Saved: {} (ChatGPT OAuth)", path.display()));
+                        self.create_status_is_error = false;
+                        self.reset_create_form();
+                        self.refresh_backends(config_dir);
+                        self.mode = Mode::Select;
+                    }
+                    Err(e) => {
+                        self.create_status = Some(format!("Error: {}", e));
+                        self.create_status_is_error = true;
+                    }
+                }
+            }
+            Ok(OauthOutcome::Error { message }) => {
+                self.oauth_rx = None;
+                self.oauth_in_progress = false;
+                self.create_status = Some(format!("Login failed: {}", message));
+                self.create_status_is_error = true;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.oauth_rx = None;
+                self.oauth_in_progress = false;
+                self.create_status = Some("Login failed unexpectedly".into());
+                self.create_status_is_error = true;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Abort an in-flight OAuth login from the create form.
+    pub fn cancel_oauth(&mut self) {
+        // Dropping the receiver unblocks nothing, but the login thread times
+        // out on its own; the user can immediately re-trigger the login.
+        self.oauth_rx = None;
+        self.oauth_in_progress = false;
+        self.create_status = Some("Login cancelled".into());
+        self.create_status_is_error = true;
     }
 }
 
@@ -293,6 +462,10 @@ fn run_on_stdout(app: &mut App, config_dir: &std::path::Path) -> io::Result<bool
     Ok(app.confirmed)
 }
 
+/// `--eval` mode draws on stderr with the alternate screen. The inline
+/// viewport used elsewhere is not an option here: it has to query the cursor
+/// position, and crossterm sends that query to stdout — which in this mode is
+/// the pipe consumed by `eval`, so the query would never be answered.
 fn run_on_stderr(app: &mut App, config_dir: &std::path::Path) -> io::Result<bool> {
     let mut stderr = io::stderr();
     execute!(stderr, EnterAlternateScreen)?;
@@ -319,10 +492,12 @@ fn event_loop<W: Write>(
 ) -> io::Result<()> {
     app.start_checks();
     app.start_stats_scan(config_dir);
+    app.refresh_oauth_infos(config_dir);
 
     while !app.should_quit {
         app.poll_checks();
         app.poll_stats();
+        app.poll_oauth(config_dir);
         terminal.draw(|frame| ui::render(frame, app))?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -349,6 +524,17 @@ fn event_loop<W: Write>(
                             }
                             _ => {}
                         }
+                        continue;
+                    }
+
+                    // In the create form, ←/→ changes the auth selector's
+                    // value while that row is focused instead of switching tabs.
+                    if app.mode == Mode::Create
+                        && !app.oauth_in_progress
+                        && app.create_active_field == app.auth_field_index()
+                        && matches!(key.code, KeyCode::Left | KeyCode::Right)
+                    {
+                        app.toggle_auth_type();
                         continue;
                     }
 
@@ -382,18 +568,30 @@ fn event_loop<W: Write>(
                             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => app.quit(),
                             _ => {}
                         },
-                        Mode::Create => match key.code {
-                            KeyCode::Enter => {
-                                if app.create_name.trim().is_empty() {
-                                    app.create_status = Some("Name is required".into());
-                                    app.create_status_is_error = true;
-                                } else {
-                                    app.confirm_action = ConfirmAction::SaveBackend;
+                        Mode::Create => {
+                            // While the browser login runs, only allow cancelling.
+                            if app.oauth_in_progress {
+                                match key.code {
+                                    KeyCode::Esc
+                                    | KeyCode::Char('q')
+                                    | KeyCode::Char('Q') => app.cancel_oauth(),
+                                    _ => {}
                                 }
+                                continue;
                             }
-                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => app.quit(),
-                            _ => app.handle_create_key(key.code),
-                        },
+                            match key.code {
+                                KeyCode::Enter => {
+                                    if app.create_name.trim().is_empty() {
+                                        app.create_status = Some("Name is required".into());
+                                        app.create_status_is_error = true;
+                                    } else {
+                                        app.confirm_action = ConfirmAction::SaveBackend;
+                                    }
+                                }
+                                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => app.quit(),
+                                _ => app.handle_create_key(key.code),
+                            }
+                        }
                     }
                 }
             }
@@ -401,4 +599,86 @@ fn event_loop<W: Write>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        App::new(Vec::new())
+    }
+
+    #[test]
+    fn test_typing_accepts_all_printable_chars() {
+        // Regression: 't' used to be swallowed as the auth-type toggle, which
+        // made names like "gpt-test" impossible to type.
+        let mut app = test_app();
+        for c in "gpt-test".chars() {
+            app.handle_create_key(KeyCode::Char(c));
+        }
+        assert_eq!(app.create_name, "gpt-test");
+
+        app.handle_create_key(KeyCode::Backspace);
+        assert_eq!(app.create_name, "gpt-tes");
+    }
+
+    #[test]
+    fn test_tab_reaches_auth_row_and_wraps() {
+        let mut app = test_app();
+        assert_eq!(app.create_auth_type, CreateAuthType::ApiKey);
+        assert_eq!(app.create_field_count(), 5);
+        assert_eq!(app.auth_field_index(), 4);
+
+        // Tab four times: name → base url → api key → description → auth
+        for _ in 0..4 {
+            app.handle_create_key(KeyCode::Tab);
+        }
+        assert_eq!(app.create_active_field, app.auth_field_index());
+
+        // One more Tab wraps back to the name
+        app.handle_create_key(KeyCode::Tab);
+        assert_eq!(app.create_active_field, 0);
+    }
+
+    #[test]
+    fn test_auth_toggle_switches_fields_and_resets_focus() {
+        let mut app = test_app();
+        app.create_active_field = app.auth_field_index();
+        app.toggle_auth_type();
+        assert_eq!(app.create_auth_type, CreateAuthType::ChatgptOauth);
+        assert_eq!(app.create_field_count(), 3);
+        assert_eq!(app.auth_field_index(), 2);
+        assert_eq!(app.create_active_field, 0, "focus must land on a valid row");
+
+        app.toggle_auth_type();
+        assert_eq!(app.create_auth_type, CreateAuthType::ApiKey);
+    }
+
+    #[test]
+    fn test_typing_on_auth_row_is_ignored() {
+        let mut app = test_app();
+        app.create_active_field = app.auth_field_index();
+        app.handle_create_key(KeyCode::Char('x'));
+        assert!(app.create_name.is_empty());
+        assert!(app.create_description.is_empty());
+    }
+
+    #[test]
+    fn test_up_from_name_wraps_to_auth_row() {
+        let mut app = test_app();
+        app.handle_create_key(KeyCode::Up);
+        assert_eq!(app.create_active_field, app.auth_field_index());
+    }
+
+    #[test]
+    fn test_oauth_mode_field_mapping() {
+        let mut app = test_app();
+        app.create_auth_type = CreateAuthType::ChatgptOauth;
+        // OAuth mode: name, description, auth
+        assert_eq!(app.create_field_count(), 3);
+        app.create_active_field = 1;
+        app.handle_create_key(KeyCode::Char('d'));
+        assert_eq!(app.create_description, "d");
+    }
 }

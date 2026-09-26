@@ -1,6 +1,6 @@
 [package]
 name = "claude-switch"
-version = "0.1.8"
+version = "0.2.0"
 edition = "2021"
 description = "A small TUI for switching Claude Code backend environment variables."
 
@@ -14,3 +14,7 @@ dirs = "5"
 anyhow = "1"
 ureq = { version = "2", features = ["json"] }
 serde_json = "1"
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+url = "2"
